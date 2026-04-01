@@ -1,0 +1,214 @@
+trigger: 
+  branches:
+    include:
+      - feature/*
+      - main
+pool: todo-app-infra
+
+parameters:
+  - name: Environment
+    type: string
+    default: dev
+    values:
+      - dev
+      - prepod
+      - prod
+
+stages:
+
+# =========================
+# 1. Terraform Init
+# =========================
+- stage: terraformInit
+  displayName: Terraform Init
+  jobs:
+    - job: TerraformInit
+      steps:
+        - task: TerraformTask@5
+          inputs:
+            provider: 'azurerm'
+            command: 'init'
+            backendServiceArm: 'unicsolutions'
+            backendAzureRmResourceGroupName: 'shahed-rg'
+            backendAzureRmStorageAccountName: 'shahedstg1981'
+            backendAzureRmContainerName: 'tfscontainer'
+            backendAzureRmKey: 'dev.terraform.tfstate'
+
+# =========================
+# 2. Validate + Plan
+# =========================
+- stage: terraformValidate
+  displayName: Terraform Validate & Plan
+  jobs:
+    - job: TerraformValidate
+      steps:
+
+        - task: TerraformTask@5
+          inputs:
+            provider: 'azurerm'
+            command: 'init'
+            backendServiceArm: 'unicsolutions'
+            backendAzureRmResourceGroupName: 'shahed-rg'
+            backendAzureRmStorageAccountName: 'shahedstg1981'
+            backendAzureRmContainerName: 'tfscontainer'
+            backendAzureRmKey: 'dev.terraform.tfstate'
+
+        - task: TerraformTask@5
+          inputs:
+            provider: azurerm
+            command: validate
+
+        - task: TerraformTask@5
+          displayName: Terraform Plan
+          inputs:
+            provider: 'azurerm'
+            command: 'plan'
+            commandOptions: '-out=tfplan.binary'
+            environmentServiceNameAzureRM: 'unicsolutions'
+
+# =========================
+# 3. Security Scan
+# =========================
+- stage: terraformScan
+  dependsOn: terraformValidate
+  displayName: Terraform Scan
+  jobs:
+
+    - job: tflintScan
+      displayName: TFLint Scan
+      steps:
+        - powershell: |
+            $env:PATH = "$(Agent.ToolsDirectory)\tflint;$env:PATH"
+            Write-Host "Running TFLint..."
+            cd "$(System.DefaultWorkingDirectory)"
+            tflint --init
+            tflint
+            exit 0
+# =========================
+# 4. Terratest
+# =========================
+- stage: TerraTest
+  displayName: Run Terratest
+  dependsOn: terraformScan
+
+  jobs:
+    - job: RunTerraTest
+      timeoutInMinutes: 60
+
+      steps:
+        - checkout: self
+
+        # 🔐 Federated Login
+        - task: AzureCLI@2
+          displayName: Azure Login (Federated)
+          inputs:
+            azureSubscription: 'unicsolutions'
+            scriptType: 'ps'
+            scriptLocation: 'inlineScript'
+            inlineScript: |
+              az account show
+
+        # 🔧 Install Terraform CLI
+        - task: TerraformInstaller@1
+          displayName: Install Terraform
+          inputs:
+            terraformVersion: '1.5.7'
+
+        # 🧪 Install Go & Run Terratest
+        - task: PowerShell@2
+          displayName: Install Go & Run Terratest
+          inputs:
+            targetType: inline
+            script: |
+
+              # Install Go if missing
+              if (-not (Get-Command go -ErrorAction SilentlyContinue)) {
+                Write-Host "Installing Go..."
+                choco install golang -y --no-progress
+              }
+
+              # Add Go to PATH
+              $goPath = "C:\Program Files\Go\bin"
+              if ($env:Path -notlike "*$goPath*") {
+                $env:Path = "$goPath;$env:Path"
+              }
+
+              go version
+              terraform version
+
+              # ✅ Correct test path
+              $testPath = "$(System.DefaultWorkingDirectory)\tests"
+
+              Write-Host "Checking repo structure..."
+              Get-ChildItem "$(System.DefaultWorkingDirectory)"
+
+              if (-not (Test-Path $testPath)) {
+                Write-Error "Tests folder not found at $testPath"
+                exit 1
+              }
+
+              Set-Location $testPath
+
+              # ✅ Safe go.mod handling
+              if (Test-Path "go.mod") {
+                Write-Host "go.mod already exists"
+              } else {
+                go mod init terratest
+              }
+
+              # Install dependencies
+              go get github.com/gruntwork-io/terratest@v0.46.16
+              go mod tidy
+              go mod download
+
+              # 🔐 Federated auth
+              $env:ARM_USE_AZUREAD = "true"
+
+              # ⚠️ Avoid state conflicts
+              $env:TF_DATA_DIR = "$env:TEMP\terraform-test"
+              $env:TF_CLI_ARGS = "-lock=false"
+
+              # ⚠️ Force Terraform (extra safety, but main fix is in test.go)
+              $env:TERRAFORM_BINARY = "terraform"
+
+              # Run tests
+              go test -v -timeout 60m
+# =========================
+# 5. Manual Approval
+# =========================
+- stage: ManualValidation
+  displayName: Manual Approval
+  dependsOn: TerraTest
+  jobs:
+    - job: WaitForApproval
+      pool: server
+      steps:
+        - task: ManualValidation@1
+          inputs:
+            instructions: "Approve before Terraform Apply"
+
+# =========================
+# 6. Terraform Apply
+# =========================
+- stage: TerraformApply
+  displayName: Terraform Apply
+  dependsOn: ManualValidation
+  jobs:
+    - job: TerraformApply
+      steps:
+
+        - task: TerraformTask@5
+          inputs:
+            provider: 'azurerm'
+            command: 'init'
+            backendServiceArm: 'unicsolutions'
+            backendAzureRmResourceGroupName: 'shahed-rg'
+            backendAzureRmStorageAccountName: 'shahedstg1981'
+            backendAzureRmContainerName: 'tfscontainer'
+            backendAzureRmKey: 'dev.terraform.tfstate'
+
+        - task: TerraformTask@5
+          inputs:
+            provider: 'azurerm'
+            command: 'apply'
+            environmentServiceNameAzureRM: 'unicsolutions'
