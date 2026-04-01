@@ -1,8 +1,8 @@
 trigger: 
   branches:
     include:
-      - feature/*
-      - main
+      - dev/*
+  
 pool: todo-app-infra
 
 parameters:
@@ -11,9 +11,8 @@ parameters:
     default: dev
     values:
       - dev
-      - prepod
+      - staging
       - prod
-
 stages:
 
 # =========================
@@ -98,7 +97,7 @@ stages:
       steps:
         - checkout: self
 
-        # 🔐 Federated Login
+        #  Federated Login
         - task: AzureCLI@2
           displayName: Azure Login (Federated)
           inputs:
@@ -108,13 +107,13 @@ stages:
             inlineScript: |
               az account show
 
-        # 🔧 Install Terraform CLI
+        #  Install Terraform CLI
         - task: TerraformInstaller@1
           displayName: Install Terraform
           inputs:
             terraformVersion: '1.5.7'
 
-        # 🧪 Install Go & Run Terratest
+        # Install Go & Run Terratest
         - task: PowerShell@2
           displayName: Install Go & Run Terratest
           inputs:
@@ -136,7 +135,7 @@ stages:
               go version
               terraform version
 
-              # ✅ Correct test path
+              #  Correct test path
               $testPath = "$(System.DefaultWorkingDirectory)\tests"
 
               Write-Host "Checking repo structure..."
@@ -149,7 +148,7 @@ stages:
 
               Set-Location $testPath
 
-              # ✅ Safe go.mod handling
+              # Safe go.mod handling
               if (Test-Path "go.mod") {
                 Write-Host "go.mod already exists"
               } else {
@@ -161,14 +160,14 @@ stages:
               go mod tidy
               go mod download
 
-              # 🔐 Federated auth
+              # Federated auth
               $env:ARM_USE_AZUREAD = "true"
 
-              # ⚠️ Avoid state conflicts
+              # Avoid state conflicts
               $env:TF_DATA_DIR = "$env:TEMP\terraform-test"
               $env:TF_CLI_ARGS = "-lock=false"
 
-              # ⚠️ Force Terraform (extra safety, but main fix is in test.go)
+              # Force Terraform (extra safety, but main fix is in test.go)
               $env:TERRAFORM_BINARY = "terraform"
 
               # Run tests
