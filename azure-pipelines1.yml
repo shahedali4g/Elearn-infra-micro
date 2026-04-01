@@ -2,9 +2,12 @@ trigger:
   branches:
     include:
       - dev/*
-  
-pool: todo-app-infra
+      - staging/*
+      - prod/*
 
+pool: todo-app-infra
+variables:
+  environmentName: $[split(variables['Build.SourceBranch'], '/')[1]]
 parameters:
   - name: Environment
     type: string
@@ -31,7 +34,7 @@ stages:
             backendAzureRmResourceGroupName: 'shahed-rg'
             backendAzureRmStorageAccountName: 'shahedstg1981'
             backendAzureRmContainerName: 'tfscontainer'
-            backendAzureRmKey: 'dev.terraform.tfstate'
+            backendAzureRmKey: '${{ parameters.Environment }}.terraform.tfstate'
 
 # =========================
 # 2. Validate + Plan
@@ -50,7 +53,7 @@ stages:
             backendAzureRmResourceGroupName: 'shahed-rg'
             backendAzureRmStorageAccountName: 'shahedstg1981'
             backendAzureRmContainerName: 'tfscontainer'
-            backendAzureRmKey: 'dev.terraform.tfstate'
+            backendAzureRmKey: '${{ parameters.Environment }}.terraform.tfstate'
 
         - task: TerraformTask@5
           inputs:
@@ -62,8 +65,11 @@ stages:
           inputs:
             provider: 'azurerm'
             command: 'plan'
-            commandOptions: '-out=tfplan.binary'
+            commandOptions: '-var="environment=${{ parameters.Environment }}" -out=tfplan.binary'
             environmentServiceNameAzureRM: 'unicsolutions'
+         # Publish plan as artifact   
+        - publish: tfplan.binary
+          artifact: tfplan
 
 # =========================
 # 3. Security Scan
@@ -99,7 +105,7 @@ stages:
 
         #  Federated Login
         - task: AzureCLI@2
-          displayName: Azure Login (Federated)
+          displayName: Azure Login (Azure login using service connection Federated)
           inputs:
             azureSubscription: 'unicsolutions'
             scriptType: 'ps'
@@ -178,6 +184,8 @@ stages:
 - stage: ManualValidation
   displayName: Manual Approval
   dependsOn: TerraTest
+  # Only for PROD
+  condition: eq('${{ parameters.Environment }}', 'prod')
   jobs:
     - job: WaitForApproval
       pool: server
@@ -192,6 +200,16 @@ stages:
 - stage: TerraformApply
   displayName: Terraform Apply
   dependsOn: ManualValidation
+  # prod → apply only after approval
+  condition: |
+  or(
+    ne('${{ parameters.Environment }}', 'prod'),
+    and(
+      eq('${{ parameters.Environment }}', 'prod'),
+      succeeded('ManualValidation')
+    )
+  )
+
   jobs:
     - job: TerraformApply
       steps:
@@ -204,10 +222,11 @@ stages:
             backendAzureRmResourceGroupName: 'shahed-rg'
             backendAzureRmStorageAccountName: 'shahedstg1981'
             backendAzureRmContainerName: 'tfscontainer'
-            backendAzureRmKey: 'dev.terraform.tfstate'
+            backendAzureRmKey: '${{ parameters.Environment }}.terraform.tfstate'
 
         - task: TerraformTask@5
           inputs:
             provider: 'azurerm'
             command: 'apply'
+            commandOptions: 'tfplan.binary'
             environmentServiceNameAzureRM: 'unicsolutions'
